@@ -1,13 +1,14 @@
 import os
 import random
 import warnings
+
 import numpy as np
 import pandas as pd
 
 from scipy import stats
 from scipy.ndimage import convolve1d
 
-from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import RidgeClassifierCV, LogisticRegression
 from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.pipeline import make_pipeline
@@ -31,10 +32,10 @@ SAMPLE_SUBMISSION = "sample_submission.csv"
 
 RAW_COLS = ["mean_x", "mean_y", "mean_z", "std_x", "std_y", "std_z"]
 
-# More kernels = potentially stronger but slower.
-# 5000 is a good compromise on a MacBook.
-N_KERNELS = 5000
+# Increased from 5000 → 10000 for stronger ROCKET features
+N_KERNELS = 10000
 
+# Set to True to run group-based cross-validation before final training
 RUN_VALIDATION = True
 N_SPLITS = 5
 
@@ -65,7 +66,7 @@ def validate_df(df, path, train=True):
         raise ValueError(f"{path} missing columns: {missing}")
 
     if len(df) != SEQ_LEN:
-        raise ValueError(f"{path}: expected 300 rows, got {len(df)}")
+        raise ValueError(f"{path}: expected {SEQ_LEN} rows, got {len(df)}")
 
     if df["file_id"].nunique() != 1:
         raise ValueError(f"{path}: multiple file_id values")
@@ -76,7 +77,7 @@ def validate_df(df, path, train=True):
 # ============================================================
 
 def load_train(train_dir):
-    X, y, groups, file_ids = [], [], [], []
+    X, y, groups = [], [], []
 
     users = sorted(
         d for d in os.listdir(train_dir)
@@ -88,35 +89,31 @@ def load_train(train_dir):
 
         for file in sorted(f for f in os.listdir(user_path) if f.endswith(".csv")):
             path = os.path.join(user_path, file)
-
             df = pd.read_csv(path)
             validate_df(df, path, train=True)
             df = df.sort_values("index").reset_index(drop=True)
 
             file_id = int(df["file_id"].iloc[0])
             filename_id = int(file.replace(".csv", ""))
-
             if file_id != filename_id:
-                raise ValueError(f"{path}: file_id does not match filename")
+                raise ValueError(f"{path}: file_id mismatch")
 
             if df["label"].nunique() != 1:
-                raise ValueError(f"{path}: multiple labels")
+                raise ValueError(f"{path}: multiple labels in one file")
 
             label = int(df["label"].iloc[0])
-
             if label < 0 or label > 5:
                 raise ValueError(f"{path}: invalid label {label}")
 
             X.append(df[RAW_COLS].values.astype(np.float32))
             y.append(label)
             groups.append(user)
-            file_ids.append(file_id)
 
-    return np.array(X), np.array(y), np.array(groups), np.array(file_ids)
+    return np.array(X), np.array(y), np.array(groups)
 
 
 def load_test(test_dir):
-    X, ids, test_groups = [], [], []
+    X, ids = [], []
 
     users = sorted(
         d for d in os.listdir(test_dir)
@@ -128,22 +125,19 @@ def load_test(test_dir):
 
         for file in sorted(f for f in os.listdir(user_path) if f.endswith(".csv")):
             path = os.path.join(user_path, file)
-
             df = pd.read_csv(path)
             validate_df(df, path, train=False)
             df = df.sort_values("index").reset_index(drop=True)
 
             file_id = int(df["file_id"].iloc[0])
             filename_id = int(file.replace(".csv", ""))
-
             if file_id != filename_id:
-                raise ValueError(f"{path}: file_id does not match filename")
+                raise ValueError(f"{path}: file_id mismatch")
 
             X.append(df[RAW_COLS].values.astype(np.float32))
             ids.append(file_id)
-            test_groups.append(user)
 
-    return np.array(X), np.array(ids), np.array(test_groups)
+    return np.array(X), np.array(ids)
 
 
 # ============================================================
@@ -152,152 +146,110 @@ def load_test(test_dir):
 
 def add_channels(X):
     """
-    Input:
-        X shape = (n_samples, 300, 6)
-
-    Output:
-        X_new shape = (n_samples, 300, channels)
-
-    We keep the original channels and add motion-oriented channels.
+    Extends the 6 raw channels with motion-derived features.
+    Input:  (n, 300, 6)
+    Output: (n, 300, 17)
     """
+    mx, my, mz = X[:, :, 0], X[:, :, 1], X[:, :, 2]
+    sx, sy, sz = X[:, :, 3], X[:, :, 4], X[:, :, 5]
 
-    mx = X[:, :, 0]
-    my = X[:, :, 1]
-    mz = X[:, :, 2]
+    mag     = np.sqrt(mx**2 + my**2 + mz**2)
+    std_mag = np.sqrt(sx**2 + sy**2 + sz**2)
 
-    sx = X[:, :, 3]
-    sy = X[:, :, 4]
-    sz = X[:, :, 5]
-
-    mag = np.sqrt(mx ** 2 + my ** 2 + mz ** 2)
-    std_mag = np.sqrt(sx ** 2 + sy ** 2 + sz ** 2)
-
-    dmx = np.diff(mx, axis=1, prepend=mx[:, :1])
-    dmy = np.diff(my, axis=1, prepend=my[:, :1])
-    dmz = np.diff(mz, axis=1, prepend=mz[:, :1])
+    dmx  = np.diff(mx,  axis=1, prepend=mx[:, :1])
+    dmy  = np.diff(my,  axis=1, prepend=my[:, :1])
+    dmz  = np.diff(mz,  axis=1, prepend=mz[:, :1])
     dmag = np.diff(mag, axis=1, prepend=mag[:, :1])
-
     ddmag = np.diff(dmag, axis=1, prepend=dmag[:, :1])
 
-    energy = mx ** 2 + my ** 2 + mz ** 2
-
+    energy   = mx**2 + my**2 + mz**2
     ratio_xy = mx / (np.abs(my) + 1e-6)
     ratio_xz = mx / (np.abs(mz) + 1e-6)
     ratio_yz = my / (np.abs(mz) + 1e-6)
 
     extra = np.stack(
-        [
-            mag,
-            std_mag,
-            dmx,
-            dmy,
-            dmz,
-            dmag,
-            ddmag,
-            energy,
-            ratio_xy,
-            ratio_xz,
-            ratio_yz,
-        ],
+        [mag, std_mag, dmx, dmy, dmz, dmag, ddmag,
+         energy, ratio_xy, ratio_xz, ratio_yz],
         axis=2,
     )
 
-    X_new = np.concatenate([X, extra], axis=2).astype(np.float32)
-
-    X_new[~np.isfinite(X_new)] = 0.0
-
-    return X_new
+    out = np.concatenate([X, extra], axis=2).astype(np.float32)
+    out[~np.isfinite(out)] = 0.0
+    return out
 
 
-def normalize_sequence_channels(X_train, X_test):
+def normalize_channels(X_train, X_test):
     n_train, t, c = X_train.shape
     n_test = X_test.shape[0]
 
     scaler = StandardScaler()
+    X_tr = scaler.fit_transform(X_train.reshape(-1, c)).reshape(n_train, t, c)
+    X_te = scaler.transform(X_test.reshape(-1, c)).reshape(n_test, t, c)
 
-    X_train_2d = X_train.reshape(-1, c)
-    X_test_2d = X_test.reshape(-1, c)
-
-    X_train_scaled = scaler.fit_transform(X_train_2d).reshape(n_train, t, c)
-    X_test_scaled = scaler.transform(X_test_2d).reshape(n_test, t, c)
-
-    return X_train_scaled.astype(np.float32), X_test_scaled.astype(np.float32)
+    return X_tr.astype(np.float32), X_te.astype(np.float32)
 
 
 # ============================================================
-# CLASSICAL STATISTICAL FEATURES
+# STATISTICAL FEATURES
 # ============================================================
 
 def safe_skew(x):
     v = stats.skew(x)
-    return v if np.isfinite(v) else 0.0
+    return float(v) if np.isfinite(v) else 0.0
 
 
 def safe_kurtosis(x):
     v = stats.kurtosis(x)
-    return v if np.isfinite(v) else 0.0
+    return float(v) if np.isfinite(v) else 0.0
 
 
 def safe_corr(a, b):
     if np.std(a) == 0 or np.std(b) == 0:
         return 0.0
     v = np.corrcoef(a, b)[0, 1]
-    return v if np.isfinite(v) else 0.0
+    return float(v) if np.isfinite(v) else 0.0
 
 
 def one_axis_stats(x):
     return [
-        np.mean(x),
-        np.std(x),
-        np.min(x),
-        np.max(x),
-        np.median(x),
-        np.percentile(x, 5),
-        np.percentile(x, 10),
-        np.percentile(x, 25),
-        np.percentile(x, 75),
-        np.percentile(x, 90),
-        np.percentile(x, 95),
+        np.mean(x), np.std(x), np.min(x), np.max(x), np.median(x),
+        np.percentile(x, 5), np.percentile(x, 10),
+        np.percentile(x, 25), np.percentile(x, 75),
+        np.percentile(x, 90), np.percentile(x, 95),
         np.max(x) - np.min(x),
         np.var(x),
         safe_skew(x),
         safe_kurtosis(x),
         np.mean(np.abs(x - np.mean(x))),
-        np.sqrt(np.mean(x ** 2)),
+        np.sqrt(np.mean(x**2)),
     ]
 
 
 def extract_stat_features_one(seq):
     features = []
 
-    # seq shape: (300, channels)
+    # Per-channel global stats
     for c in range(seq.shape[1]):
-        x = seq[:, c]
-        features.extend(one_axis_stats(x))
+        features.extend(one_axis_stats(seq[:, c]))
 
-    # segment statistics
-    for segments in [2, 3, 5, 10]:
-        splits = np.array_split(np.arange(seq.shape[0]), segments)
-
+    # Segment-level means (temporal structure)
+    for n_seg in [2, 3, 5, 10]:
+        splits = np.array_split(np.arange(seq.shape[0]), n_seg)
         for c in range(seq.shape[1]):
-            vals = []
-            for idx in splits:
-                vals.append(np.mean(seq[idx, c]))
-
+            vals = [np.mean(seq[idx, c]) for idx in splits]
             features.extend(vals)
-            features.append(vals[-1] - vals[0])
-            features.append(max(vals) - min(vals))
+            features.append(vals[-1] - vals[0])   # trend
+            features.append(max(vals) - min(vals)) # range across segments
 
-    # correlations for original and important derived channels
+    # Cross-channel correlations (first 10 channels)
     max_c = min(seq.shape[1], 10)
     for i in range(max_c):
         for j in range(i + 1, max_c):
             features.append(safe_corr(seq[:, i], seq[:, j]))
 
-    features = np.array(features, dtype=np.float32)
-    features[~np.isfinite(features)] = 0.0
-
-    return features
+    arr = np.array(features, dtype=np.float32)
+    arr[~np.isfinite(arr)] = 0.0
+    return arr
 
 
 def extract_stat_features(X):
@@ -305,185 +257,79 @@ def extract_stat_features(X):
 
 
 # ============================================================
-# ROCKET-LIKE RANDOM CONVOLUTION FEATURES
+# ROCKET
 # ============================================================
 
 def generate_kernels(n_kernels, n_channels, seed):
     rng = np.random.default_rng(seed)
-
     kernels = []
 
-    possible_lengths = [7, 9, 11, 13]
-    possible_dilations = [1, 2, 3, 4, 5, 7, 9, 12]
-
     for _ in range(n_kernels):
-        length = int(rng.choice(possible_lengths))
-        dilation = int(rng.choice(possible_dilations))
+        length   = int(rng.choice([7, 9, 11, 13]))
+        dilation = int(rng.choice([1, 2, 3, 4, 5, 7, 9, 12]))
 
-        max_channels = min(n_channels, 5)
-        n_used_channels = int(rng.integers(1, max_channels + 1))
-        channels = rng.choice(n_channels, size=n_used_channels, replace=False)
+        n_ch = int(rng.integers(1, min(n_channels, 5) + 1))
+        channels = rng.choice(n_channels, size=n_ch, replace=False)
 
-        weights = rng.normal(0, 1, size=(n_used_channels, length)).astype(np.float32)
-
-        # Important ROCKET-style normalization:
-        # each kernel has zero mean weights
-        weights = weights - weights.mean(axis=1, keepdims=True)
+        weights = rng.normal(0, 1, size=(n_ch, length)).astype(np.float32)
+        weights -= weights.mean(axis=1, keepdims=True)  # zero-mean (ROCKET style)
 
         bias = float(rng.uniform(-1.0, 1.0))
-
         kernels.append((channels, weights, dilation, bias))
 
     return kernels
 
 
 def apply_one_kernel(X, channels, weights, dilation, bias):
-    """
-    X shape = (n_samples, time, channels)
-    Output features:
-        max convolution response
-        proportion of positive values
-        mean positive response
-    """
-
     n = X.shape[0]
     conv_sum = np.zeros((n, X.shape[1]), dtype=np.float32)
 
     for local_i, ch in enumerate(channels):
         w = weights[local_i]
-
         if dilation > 1:
             dilated = np.zeros((len(w) - 1) * dilation + 1, dtype=np.float32)
             dilated[::dilation] = w
-            w_use = dilated
-        else:
-            w_use = w
+            w = dilated
 
         conv = convolve1d(
-            X[:, :, ch],
-            weights=w_use[::-1],
-            axis=1,
-            mode="constant",
-            cval=0.0,
+            X[:, :, ch], weights=w[::-1], axis=1, mode="constant", cval=0.0
         )
-
         conv_sum += conv.astype(np.float32)
 
     conv_sum += bias
-
-    max_val = np.max(conv_sum, axis=1)
-    ppv = np.mean(conv_sum > 0, axis=1)
+    max_val  = np.max(conv_sum, axis=1)
+    ppv      = np.mean(conv_sum > 0, axis=1)
     mean_pos = np.mean(np.maximum(conv_sum, 0), axis=1)
-
     return max_val, ppv, mean_pos
 
 
-def rocket_transform(X, kernels, batch_print=500):
+def rocket_transform(X, kernels):
     n = X.shape[0]
     out = np.zeros((n, len(kernels) * 3), dtype=np.float32)
 
     for i, (channels, weights, dilation, bias) in enumerate(kernels):
-        max_val, ppv, mean_pos = apply_one_kernel(X, channels, weights, dilation, bias)
+        mv, ppv, mp = apply_one_kernel(X, channels, weights, dilation, bias)
+        out[:, 3*i]   = mv
+        out[:, 3*i+1] = ppv
+        out[:, 3*i+2] = mp
 
-        out[:, 3 * i] = max_val
-        out[:, 3 * i + 1] = ppv
-        out[:, 3 * i + 2] = mean_pos
-
-        if (i + 1) % batch_print == 0:
-            print(f"ROCKET kernels processed: {i + 1}/{len(kernels)}")
+        if (i + 1) % 1000 == 0:
+            print(f"  ROCKET: {i+1}/{len(kernels)} kernels done")
 
     out[~np.isfinite(out)] = 0.0
     return out
 
 
 # ============================================================
-# VALIDATION
+# MODELS
 # ============================================================
 
-def run_validation(X_features, y, groups):
-    print("\nRunning group-based validation...")
-
-    splitter = StratifiedGroupKFold(
-        n_splits=N_SPLITS,
-        shuffle=True,
-        random_state=RANDOM_STATE,
-    )
-
-    ridge_scores = []
-    logreg_scores = []
-    et_scores = []
-
-    for fold, (tr, va) in enumerate(splitter.split(X_features, y, groups), start=1):
-        print(f"\nFold {fold}/{N_SPLITS}")
-
-        X_tr, X_va = X_features[tr], X_features[va]
-        y_tr, y_va = y[tr], y[va]
-
-        ridge = make_pipeline(
-            StandardScaler(),
-            RidgeClassifierCV(
-                alphas=np.logspace(-3, 3, 13),
-                class_weight="balanced",
-            ),
-        )
-
-        ridge.fit(X_tr, y_tr)
-        pred_ridge = ridge.predict(X_va)
-        f1_ridge = f1_score(y_va, pred_ridge, average="macro", zero_division=0)
-        ridge_scores.append(f1_ridge)
-
-        print(f"Ridge ROCKET F1: {f1_ridge:.5f}")
-
-        logreg = make_pipeline(
-            StandardScaler(),
-            LogisticRegression(
-                C=1.5,
-                penalty="l2",
-                solver="lbfgs",
-                max_iter=800,
-                class_weight="balanced",
-                multi_class="auto",
-                n_jobs=-1,
-            ),
-        )
-
-        logreg.fit(X_tr, y_tr)
-        pred_logreg = logreg.predict(X_va)
-        f1_logreg = f1_score(y_va, pred_logreg, average="macro", zero_division=0)
-        logreg_scores.append(f1_logreg)
-
-        print(f"LogReg ROCKET F1: {f1_logreg:.5f}")
-
-        et = ExtraTreesClassifier(
-            n_estimators=350,
-            max_depth=None,
-            min_samples_leaf=1,
-            max_features="sqrt",
-            class_weight="balanced",
-            random_state=RANDOM_STATE + fold,
-            n_jobs=-1,
-        )
-
-        et.fit(X_tr, y_tr)
-        pred_et = et.predict(X_va)
-        f1_et = f1_score(y_va, pred_et, average="macro", zero_division=0)
-        et_scores.append(f1_et)
-
-        print(f"ExtraTrees hybrid F1: {f1_et:.5f}")
-
-    print("\nValidation summary:")
-    print(f"Ridge:     {np.mean(ridge_scores):.5f} ± {np.std(ridge_scores):.5f}")
-    print(f"LogReg:    {np.mean(logreg_scores):.5f} ± {np.std(logreg_scores):.5f}")
-    print(f"ExtraTrees:{np.mean(et_scores):.5f} ± {np.std(et_scores):.5f}")
-
-
-# ============================================================
-# FINAL TRAINING
-# ============================================================
-
-def train_final_models(X_features, y):
-    print("\nTraining final models on full training data...")
-
+def build_models():
+    """
+    Returns three classifiers that complement each other.
+    All use class_weight='balanced' to handle the heavy imbalance
+    (classes 0+1 = 85% of data, class 4 = only 1.3%).
+    """
     ridge = make_pipeline(
         StandardScaler(),
         RidgeClassifierCV(
@@ -496,48 +342,73 @@ def train_final_models(X_features, y):
         StandardScaler(),
         LogisticRegression(
             C=1.5,
-            penalty="l2",
             solver="lbfgs",
             max_iter=1000,
             class_weight="balanced",
-            multi_class="auto",
             n_jobs=-1,
         ),
     )
 
     et = ExtraTreesClassifier(
         n_estimators=500,
-        max_depth=None,
-        min_samples_leaf=1,
         max_features="sqrt",
         class_weight="balanced",
         random_state=RANDOM_STATE,
         n_jobs=-1,
     )
 
-    rf = RandomForestClassifier(
-        n_estimators=350,
-        max_depth=None,
-        min_samples_leaf=1,
-        max_features="sqrt",
-        class_weight="balanced",
-        random_state=RANDOM_STATE,
-        n_jobs=-1,
+    return ridge, logreg, et
+
+
+def hard_vote(list_of_preds):
+    mat = np.vstack(list_of_preds).T  # (n_samples, n_models)
+    return np.array(
+        [np.argmax(np.bincount(row, minlength=NUM_CLASSES)) for row in mat]
     )
 
-    print("Training Ridge...")
-    ridge.fit(X_features, y)
 
-    print("Training Logistic Regression...")
-    logreg.fit(X_features, y)
+# ============================================================
+# VALIDATION
+# ============================================================
 
-    print("Training ExtraTrees...")
-    et.fit(X_features, y)
+def run_validation(X_features, y, groups):
+    """
+    StratifiedGroupKFold: folds are split by user so the model
+    is never evaluated on users it was trained on.
+    """
+    print(f"\nRunning {N_SPLITS}-fold group-stratified validation...")
+    splitter = StratifiedGroupKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
 
-    print("Training RandomForest...")
-    rf.fit(X_features, y)
+    scores = {"Ridge": [], "LogReg": [], "ExtraTrees": [], "Vote": []}
 
-    return ridge, logreg, et, rf
+    for fold, (tr, va) in enumerate(splitter.split(X_features, y, groups), start=1):
+        X_tr, X_va = X_features[tr], X_features[va]
+        y_tr, y_va = y[tr], y[va]
+
+        ridge, logreg, et = build_models()
+
+        ridge.fit(X_tr, y_tr)
+        logreg.fit(X_tr, y_tr)
+        et.fit(X_tr, y_tr)
+
+        p_ridge  = ridge.predict(X_va)
+        p_logreg = logreg.predict(X_va)
+        p_et     = et.predict(X_va)
+        p_vote   = hard_vote([p_ridge, p_logreg, p_et])
+
+        scores["Ridge"].append(f1_score(y_va, p_ridge,  average="macro", zero_division=0))
+        scores["LogReg"].append(f1_score(y_va, p_logreg, average="macro", zero_division=0))
+        scores["ExtraTrees"].append(f1_score(y_va, p_et,  average="macro", zero_division=0))
+        scores["Vote"].append(f1_score(y_va, p_vote, average="macro", zero_division=0))
+
+        print(f"  Fold {fold}: Ridge={scores['Ridge'][-1]:.4f}  "
+              f"LogReg={scores['LogReg'][-1]:.4f}  "
+              f"ET={scores['ExtraTrees'][-1]:.4f}  "
+              f"Vote={scores['Vote'][-1]:.4f}")
+
+    print("\nValidation summary (macro F1):")
+    for name, vals in scores.items():
+        print(f"  {name:12s}: {np.mean(vals):.4f} ± {np.std(vals):.4f}")
 
 
 # ============================================================
@@ -546,39 +417,19 @@ def train_final_models(X_features, y):
 
 def save_submission(test_ids, labels, filename):
     sample = pd.read_csv(SAMPLE_SUBMISSION)
-
-    if list(sample.columns) != ["Id", "Label"]:
-        raise ValueError("sample_submission.csv must have columns Id, Label")
-
     sample_ids = sample["Id"].astype(int).to_numpy()
-    test_ids = test_ids.astype(int)
+    test_ids   = np.array(test_ids, dtype=int)
 
     if set(sample_ids) != set(test_ids):
-        missing = sorted(set(sample_ids) - set(test_ids))[:10]
-        extra = sorted(set(test_ids) - set(sample_ids))[:10]
-        raise ValueError(f"ID mismatch. Missing={missing}, Extra={extra}")
+        raise ValueError("ID mismatch between sample_submission.csv and test files")
 
     pred_map = dict(zip(test_ids, labels))
-
     out = sample[["Id"]].copy()
     out["Label"] = [int(pred_map[i]) for i in sample_ids]
 
-    assert out["Label"].between(0, 5).all()
-    assert len(out) == len(sample)
-
+    assert out["Label"].between(0, 5).all(), "Invalid label detected"
     out.to_csv(filename, index=False)
-    print(f"Saved {filename}")
-
-
-def hard_vote(preds):
-    preds = np.vstack(preds).T
-    final = []
-
-    for row in preds:
-        counts = np.bincount(row, minlength=NUM_CLASSES)
-        final.append(np.argmax(counts))
-
-    return np.array(final)
+    print(f"  Saved → {filename}")
 
 
 # ============================================================
@@ -588,87 +439,84 @@ def hard_vote(preds):
 def main():
     seed_everything(RANDOM_STATE)
 
+    # ── Load ──────────────────────────────────────────────────
     print("Loading data...")
-
     train_dir = find_dir(TRAIN_DIRS)
-    test_dir = find_dir(TEST_DIRS)
+    test_dir  = find_dir(TEST_DIRS)
 
-    X_train_raw, y_train, groups, train_ids = load_train(train_dir)
-    X_test_raw, test_ids, test_groups = load_test(test_dir)
+    X_train_raw, y_train, groups = load_train(train_dir)
+    X_test_raw,  test_ids        = load_test(test_dir)
 
-    print("Raw train shape:", X_train_raw.shape)
-    print("Raw test shape:", X_test_raw.shape)
+    print(f"Train: {X_train_raw.shape}  Test: {X_test_raw.shape}")
     print("Class distribution:", dict(zip(*np.unique(y_train, return_counts=True))))
 
+    # ── Feature engineering ───────────────────────────────────
     print("\nAdding derived channels...")
     X_train_seq = add_channels(X_train_raw)
-    X_test_seq = add_channels(X_test_raw)
+    X_test_seq  = add_channels(X_test_raw)
 
-    print("Sequence train shape:", X_train_seq.shape)
-    print("Sequence test shape:", X_test_seq.shape)
+    print("Normalizing channels...")
+    X_train_seq, X_test_seq = normalize_channels(X_train_seq, X_test_seq)
 
-    print("\nNormalizing sequence channels...")
-    X_train_seq, X_test_seq = normalize_sequence_channels(X_train_seq, X_test_seq)
-
-    print("\nExtracting statistical features...")
+    print("Extracting statistical features...")
     X_train_stat = extract_stat_features(X_train_seq)
-    X_test_stat = extract_stat_features(X_test_seq)
+    X_test_stat  = extract_stat_features(X_test_seq)
 
-    print("Stat train shape:", X_train_stat.shape)
-    print("Stat test shape:", X_test_stat.shape)
+    # ── ROCKET ────────────────────────────────────────────────
+    print(f"\nGenerating {N_KERNELS} ROCKET kernels...")
+    kernels = generate_kernels(N_KERNELS, X_train_seq.shape[2], seed=RANDOM_STATE)
 
-    print("\nGenerating ROCKET kernels...")
-    kernels = generate_kernels(
-        n_kernels=N_KERNELS,
-        n_channels=X_train_seq.shape[2],
-        seed=RANDOM_STATE,
-    )
-
-    print("\nTransforming training data with ROCKET...")
+    print("Transforming train with ROCKET...")
     X_train_rocket = rocket_transform(X_train_seq, kernels)
 
-    print("\nTransforming test data with ROCKET...")
+    print("Transforming test with ROCKET...")
     X_test_rocket = rocket_transform(X_test_seq, kernels)
 
-    print("ROCKET train shape:", X_train_rocket.shape)
-    print("ROCKET test shape:", X_test_rocket.shape)
-
+    # ── Combine ───────────────────────────────────────────────
     print("\nCombining ROCKET + statistical features...")
-    X_train_features = np.hstack([X_train_rocket, X_train_stat]).astype(np.float32)
-    X_test_features = np.hstack([X_test_rocket, X_test_stat]).astype(np.float32)
+    X_train = np.hstack([X_train_rocket, X_train_stat]).astype(np.float32)
+    X_test  = np.hstack([X_test_rocket,  X_test_stat]).astype(np.float32)
+    X_train[~np.isfinite(X_train)] = 0.0
+    X_test[~np.isfinite(X_test)]   = 0.0
 
-    X_train_features[~np.isfinite(X_train_features)] = 0.0
-    X_test_features[~np.isfinite(X_test_features)] = 0.0
+    print(f"Final feature shape — train: {X_train.shape}  test: {X_test.shape}")
 
-    print("Final train feature shape:", X_train_features.shape)
-    print("Final test feature shape:", X_test_features.shape)
-
+    # ── Validation ────────────────────────────────────────────
     if RUN_VALIDATION:
-        run_validation(X_train_features, y_train, groups)
+        run_validation(X_train, y_train, groups)
 
-    ridge, logreg, et, rf = train_final_models(X_train_features, y_train)
+    # ── Final training ────────────────────────────────────────
+    print("\nTraining final models on full training set...")
+    ridge, logreg, et = build_models()
 
-    print("\nPredicting test data...")
+    print("  Training Ridge...")
+    ridge.fit(X_train, y_train)
 
-    pred_ridge = ridge.predict(X_test_features)
-    pred_logreg = logreg.predict(X_test_features)
-    pred_et = et.predict(X_test_features)
-    pred_rf = rf.predict(X_test_features)
+    print("  Training Logistic Regression...")
+    logreg.fit(X_train, y_train)
 
-    pred_vote = hard_vote([pred_ridge, pred_logreg, pred_et, pred_rf])
+    print("  Training ExtraTrees...")
+    et.fit(X_train, y_train)
 
-    save_submission(test_ids, pred_ridge, "submission_rocket_ridge.csv")
-    save_submission(test_ids, pred_logreg, "submission_rocket_logreg.csv")
-    save_submission(test_ids, pred_et, "submission_rocket_extratrees.csv")
-    save_submission(test_ids, pred_rf, "submission_rocket_rf.csv")
-    save_submission(test_ids, pred_vote, "submission_rocket_vote.csv")
+    # ── Predict & save ────────────────────────────────────────
+    print("\nPredicting test set...")
+    p_ridge  = ridge.predict(X_test)
+    p_logreg = logreg.predict(X_test)
+    p_et     = et.predict(X_test)
+    p_vote   = hard_vote([p_ridge, p_logreg, p_et])
+
+    os.makedirs("submissions", exist_ok=True)
+    print("\nSaving submissions...")
+    save_submission(test_ids, p_ridge,  "submissions/submission_ridge.csv")
+    save_submission(test_ids, p_logreg, "submissions/submission_logreg.csv")
+    save_submission(test_ids, p_et,     "submissions/submission_extratrees.csv")
+    save_submission(test_ids, p_vote,   "submissions/submission_vote.csv")
 
     print("\nDone.")
-    print("Recommended upload order:")
-    print("1. submission_rocket_logreg.csv")
-    print("2. submission_rocket_vote.csv")
-    print("3. submission_rocket_ridge.csv")
-    print("4. submission_rocket_extratrees.csv")
+    print("Recommended upload order (start with vote, then best single):")
+    print("  1. submissions/submission_vote.csv")
+    print("  2. submissions/submission_logreg.csv")
+    print("  3. submissions/submission_extratrees.csv")
 
 
 if __name__ == "__main__":
