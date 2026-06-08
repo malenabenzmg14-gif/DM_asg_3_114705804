@@ -10,698 +10,397 @@
 \usepackage{hyperref}
 \usepackage{booktabs}
 \usepackage{array}
-\usepackage{float}
-\usepackage{subcaption}
 \usepackage{enumitem}
-\graphicspath{{report_figures/}}
-\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
-T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
-
+\usepackage{float}
+\newcommand{\safeimage}[3]{%
+\IfFileExists{#1}{%
+\includegraphics[width=#2]{#1}%
+}{%
+\fbox{%
+\begin{minipage}[c][3.0cm][c]{#2}
+\centering
+Missing figure.\\
+Upload file: {\ttfamily\detokenize{#1}}
+\end{minipage}
+}%
+}%
+\caption{#3}
+}
 \begin{document}
-
 \title{
-Report on Assignment 3, Course Data Mining\\
-Topic: Human Activity Recognition via ROCKET\\
+Human Activity Recognition with Sequence-Aware Feature Engineering and ROCKET Features\\
 {\footnotesize Data Mining Assignment 3, 2026 Spring}
 }
 \author{
-\IEEEauthorblockN{Malena Benz,\ \ 114705804}
+\IEEEauthorblockN{Malena Benz}
+\IEEEauthorblockA{
+Student ID: 114705804\\
+GitHub: \url{https://github.com/malenabenzmg14-gif/DM_asg_3_114705804.git}
+}
 }
 \maketitle
-
-% ── Abstract ──────────────────────────────────────────────────────────────────
 \begin{abstract}
-This report presents the solution developed for the Human Activity Recognition
-(HAR) Kaggle competition in Data Mining Assignment 3.
-The goal is to classify 5-minute wrist-accelerometer sequences into one of six
-activity classes, evaluated by Macro F1-score.
-The dataset is severely imbalanced: classes 0 and 1 together account for
-84.7\,\% of training samples, while class 4 holds only 1.3\,\%.
-Our approach progressed from classical ensemble methods --- reaching a public
-leaderboard plateau of 0.7599 --- toward a ROCKET-style random convolutional
-kernel transform combined with a hard-vote ensemble of Ridge, Logistic
-Regression, and Extra Trees classifiers.
-The final pipeline with 10{,}000 kernels yields a cross-validated Macro
-F1-score of \textbf{0.741}, surpassing Kaggle Baseline-3 (0.7088).
-We provide a thorough analysis of the dataset, preprocessing impact,
-temporal alignment strategy, and a full ablation study.
-
-\medskip\noindent
-GitHub:\ \url{https://github.com/malenabenzmg14-gif/DM_asg_3_114705804.git}
+This report presents my solution for Data Mining Assignment 3 on Human Activity Recognition using wrist accelerometer data. Each sample is a 5-minute sequence with 300 ordered time steps and six raw accelerometer statistics. The task is to classify each complete sequence into one of six activity labels using Macro F1-score. My final approach treats each CSV file as one sequence-level sample, applies strict file-level label alignment, constructs motion-based temporal features, extracts ROCKET-style random convolution features, and trains a balanced RidgeClassifierCV model. The best observed Kaggle public leaderboard score during experimentation was \textbf{0.7752}. The final reproducible submitted pipeline achieved \textbf{0.7746}. This report includes preliminary analysis, preprocessing analysis, temporal alignment, ablation study, leaderboard evidence, failed-experiment analysis, and reproducibility instructions.
 \end{abstract}
-
-% ── How to run ────────────────────────────────────────────────────────────────
-\section*{How to Run the Code}
-
-\begin{enumerate}[noitemsep,topsep=2pt,leftmargin=*]
-  \item Clone the repository and enter the project directory.
-  \item Install dependencies: \texttt{pip install numpy pandas scipy scikit-learn}
-  \item Place the Kaggle data folders (\texttt{train/}, \texttt{test/},
-        \texttt{sample\_submission.csv}) in the project root.
-  \item Execute: \texttt{python solution.py}
-\end{enumerate}
-The script auto-detects whether data lives in \texttt{train/train/} or
-directly in \texttt{train/}.
-Output: a single \texttt{submission.csv} ready for Kaggle upload.
-Setting \texttt{RUN\_VALIDATION = True} (default) prints a 5-fold
-cross-validation summary before generating predictions.
-
-% ============================================================
 \section{Project Summary}
-% ============================================================
-
-The goal of this project is Human Activity Recognition (HAR) using
-accelerometer data collected from wrist-mounted sensors.
-Each sample corresponds to one independent 5-minute window represented
-as a CSV sequence of 300 ordered time steps.
-Each row contains statistical summaries of accelerometer motion in the
-X, Y, and Z axes.
-
-The challenge is to correctly model temporal dependencies while generalising
-across 100 different users.
-Since the evaluation metric is Macro F1-score, the method must perform well
-across \textit{all} activity classes, including the severely under-represented
-minority classes.
-
-Our initial experiments focused on classical machine learning methods using
-handcrafted statistical features (Random Forest, Gradient Boosting,
-ensemble tree models, FFT frequency-domain features, temporal segment
-statistics).
-Although these models achieved competitive performance, the public leaderboard
-score eventually plateaued around 0.75--0.76 Macro F1-score.
-
-To address this limitation, the final approach transitioned toward direct
-time-series modelling using ROCKET-style random convolution features~\cite{dempster2020rocket}.
-This method extracts thousands of temporal convolutional representations
-directly from the accelerometer sequence, without the need for backpropagation
-or architecture search.
-
-The final system combines statistical feature engineering, motion-oriented
-derived channels, random convolution temporal features, and an ensemble of
-three complementary classifiers.
-The experiments demonstrate that direct temporal representation learning
-substantially improves classification of minority activity classes compared to
-purely aggregated statistical representations.
-
-% ============================================================
-\section{Preliminary Data Analysis (Q1)}
-% ============================================================
-
+The goal of this assignment is to classify human activities from wrist-mounted accelerometer readings. The dataset consists of 5-minute windows, where each CSV file contains 300 rows corresponding to one-second intervals. Each row contains six raw features: \texttt{mean\_x}, \texttt{mean\_y}, \texttt{mean\_z}, \texttt{std\_x}, \texttt{std\_y}, and \texttt{std\_z}.
+The most important modeling decision is that the task is not row-level classification. Instead, each CSV file corresponds to one complete 5-minute activity window and has exactly one activity label. Therefore, the task was formulated as sequence-level classification:
+\[
+X_i \in \mathbb{R}^{300 \times 6}, \quad y_i \in \{0,1,2,3,4,5\}.
+\]
+The final method combines chronological sorting by \texttt{index}, validation of \texttt{file\_id}, magnitude-based channels, energy-based channels, temporal derivative features, segment-based statistics, ROCKET-style random convolution features, and balanced RidgeClassifierCV classification.
+The development process was iterative. Early classical feature-engineered models reached around 0.75--0.76 on the public leaderboard. The best observed Ridge-based temporal feature model reached \textbf{0.7752}. The final reproducible implementation reached \textbf{0.7746}. Additional variants, including larger ensembles, rare-class boosting, and prediction smoothing, were tested but did not consistently improve generalization. Therefore, the final submitted implementation prioritizes reproducibility, stability, and correct sequence-level processing.
+\section{Preliminary Data Analysis}
 \subsection{Dataset Overview}
-
-The training set consists of 11{,}020 CSV files from 100 users; the test set
-contains 6{,}849 files from 39 users.
-Every file has exactly 300 rows (one per second of a 5-minute window) and
-6 raw feature columns.
-
-\begin{table}[H]
+The dataset contains accelerometer readings from multiple users. The training and test folders are grouped by user. Each CSV file represents one independent 5-minute window and contains exactly 300 rows.
+\begin{table}[!t]
 \centering
-\caption{Dataset Overview}
+\caption{Dataset overview.}
+\label{tab:dataset}
 \begin{tabular}{ll}
 \toprule
 Property & Value \\
 \midrule
-Users (train / test) & 100 / 39 \\
-Samples (train / test) & 11{,}020 / 6{,}849 \\
+Task & Human Activity Recognition \\
+Sensor & Wrist accelerometer \\
+Train samples & 11,020 CSV files \\
+Test samples & 6,849 CSV files \\
 Sequence length & 300 seconds \\
-Raw channels & 6 \\
-Labels & 6 activity classes (0--5) \\
+Raw features & 6 per second \\
+Labels & 0--5 \\
 Evaluation metric & Macro F1-score \\
+Submission format & \texttt{Id, Label} \\
 \bottomrule
 \end{tabular}
 \end{table}
-
+Each training file contains one activity label. The test prediction must contain exactly one row per test CSV file, using the \texttt{file\_id} as the submission \texttt{Id}. The code verifies that each file has 300 rows, exactly one \texttt{file\_id}, and, for training files, exactly one label.
 \subsection{Class Imbalance}
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=\linewidth]{fig_class_dist.pdf}
-  \caption{Training-set class distribution.
-           Classes 0 and 1 together hold 84.7\,\% of all samples;
-           class 4 is the rarest with only 1.3\,\%.}
-  \label{fig:class_dist}
-\end{figure}
-
-As shown in Fig.~\ref{fig:class_dist}, the dataset is severely imbalanced.
-Table~\ref{tab:class_counts} details the per-class sample counts and the
-imbalance ratio relative to the minority class.
-
-\begin{table}[H]
+The training data is highly imbalanced. Table~\ref{tab:classdist} shows the observed class distribution.
+\begin{table}[!t]
 \centering
-\caption{Per-class sample counts in the training set.}
-\label{tab:class_counts}
-\begin{tabular}{crrr}
+\caption{Training class distribution.}
+\label{tab:classdist}
+\begin{tabular}{crr}
 \toprule
-Class & Count & Fraction (\%) & Imbalance ratio \\
+Class & Count & Fraction \\
 \midrule
-0 & 4{,}643 & 42.1 & 32.7$\times$ \\
-1 & 4{,}695 & 42.6 & 33.1$\times$ \\
-2 &   358  &  3.2 &  2.5$\times$ \\
-3 &   656  &  6.0 &  4.6$\times$ \\
-4 &   142  &  1.3 & 1.0$\times$ (minority) \\
-5 &   526  &  4.8 &  3.7$\times$ \\
+0 & 4,643 & 42.1\% \\
+1 & 4,695 & 42.6\% \\
+2 & 358 & 3.2\% \\
+3 & 656 & 6.0\% \\
+4 & 142 & 1.3\% \\
+5 & 526 & 4.8\% \\
 \bottomrule
 \end{tabular}
 \end{table}
-
-A naive majority-class predictor (always predicting class 1) achieves only
-Macro F1 $= 0.100$, and a random predictor proportional to class frequency
-achieves $0.169$.
-These numbers confirm that the imbalance must be explicitly addressed:
-any classifier optimised for accuracy would trivially predict classes 0 or 1,
-yielding near-zero F1 for minority classes.
-
-\subsection{Feature Statistics per Class}
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=\linewidth]{fig_boxplots.pdf}
-  \caption{Distribution of mean acceleration per axis and activity class.
-           The mean channels show substantial overlap between classes,
-           making them weak discriminators on their own.}
-  \label{fig:boxplots}
-\end{figure}
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=\linewidth]{fig_std_boxplots.pdf}
-  \caption{Distribution of within-second acceleration standard deviation
-           per axis and class.
-           The std channels are far more discriminative than the mean channels:
-           class 4 has std$_y \approx 0.363$\,g vs.\
-           class 0 at $0.008$\,g --- a $45\times$ difference.}
-  \label{fig:std_boxplots}
-\end{figure}
-
-Several patterns emerge from the raw features (see Figs.~\ref{fig:boxplots}
-and~\ref{fig:std_boxplots}):
-
+This imbalance is important because the competition is evaluated using Macro F1-score. Macro F1 gives equal weight to every class, so poor recall for rare classes such as class 4 strongly reduces the final score. This motivated the use of balanced class weights in the final classifier.
+A naive majority-class baseline would always predict label 1, the most frequent label. Although this would achieve reasonable accuracy for the dominant class, it would produce near-zero F1 for minority classes. Therefore, a successful solution must explicitly model all six classes instead of only optimizing majority-class accuracy.
+\subsection{Raw Data Observations}
+The raw data is already aggregated into one-second intervals. Therefore, classical statistical features are meaningful, but the temporal evolution across the 300-second window remains important.
+Important observations from the raw data were:
 \begin{itemize}[noitemsep]
-  \item \textbf{Mean channels are weakly discriminative.}
-        The dataset appears user-normalised; overall mean acceleration is
-        centred near zero for all classes.
-        Within-class spreads largely overlap.
-
-  \item \textbf{Std channels are strongly discriminative.}
-        Class 4 exhibits the highest per-second variability
-        (mean std$_x = 0.300$, std$_y = 0.363$, std$_z = 0.270$\,g),
-        while class 0 shows extremely low variability
-        (mean std$_x = 0.009$\,g), a $33\times$ ratio.
-
-  \item \textbf{Z-axis retains a gravitational signature.}
-        Class 4 shows an elevated mean$_z = +0.468$\,g, likely reflecting
-        wrist orientation during that activity.
-
-  \item \textbf{Class 3 shows the highest temporal variability.}
-        The temporal std of $|\mathbf{a}|$ is $0.069$\,g for class 3 versus
-        only $0.007$\,g for class 0, confirming that temporal features
-        carry additional discriminative information beyond global aggregates.
+    \item Mean-axis features alone are not sufficiently discriminative because different activities can have overlapping average acceleration.
+    \item Standard-deviation channels better describe activity intensity and motion variability.
+    \item Magnitude features reduce sensitivity to wrist orientation.
+    \item Temporal differences help distinguish activities with similar global statistics but different movement dynamics.
+    \item User variability makes user-aware validation important.
 \end{itemize}
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=0.85\linewidth]{fig_corr.pdf}
-  \caption{Global feature correlation matrix (mean values over all training
-           samples and time steps).
-           The three std channels form a tight positive cluster
-           ($r \approx 0.7$--$0.9$), while the mean--std cross-correlations
-           are near zero.}
-  \label{fig:corr}
-\end{figure}
-
-\subsection{Temporal Structure}
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=\linewidth]{fig_timeseries.pdf}
-  \caption{Mean acceleration magnitude $|\mathbf{a}|$ over the 300-second
-           window per class (mean $\pm 1\sigma$ across all samples).
-           Class 0 is remarkably flat, while class 3 shows high inter-sample
-           spread.}
-  \label{fig:timeseries}
-\end{figure}
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=\linewidth]{fig_temporal_std.pdf}
-  \caption{Temporal variability of $|\mathbf{a}|$ (std over the 300-second
-           window per sample).
-           Classes 3 and 2 are the most temporally variable; class 0 is
-           stable throughout the 5-minute window.}
-  \label{fig:temporal_std}
-\end{figure}
-
-\noindent\textbf{Key insight:} because temporal variability differs strongly
-between classes (Fig.~\ref{fig:temporal_std}), a model that captures
-\textit{how} the signal evolves over time --- not just its global statistics ---
-is expected to outperform purely aggregate-based approaches.
-
-% ============================================================
+These observations directly informed the method design: the model uses derived motion channels, temporal segment features, convolutional ROCKET features, and class-balanced learning.
 \section{Proposed Method}
-% ============================================================
-
-\subsection{Dataset Representation}
-
-Each CSV file represents one independent 5-minute activity sequence.
-The task is formulated as sequence classification:
+\subsection{File-Level Label Alignment}
+The label alignment is performed at the CSV-file level. For each file, all 300 rows are sorted by \texttt{index}, and the full ordered sequence is treated as one training sample:
 \[
-  X_i \in \mathbb{R}^{300 \times 6}, \quad y_i \in \{0,1,2,3,4,5\}
+X_i = [x_{i,0}, x_{i,1}, \ldots, x_{i,299}], \quad y_i \in \{0,1,2,3,4,5\}.
 \]
-where $X_i$ is the ordered accelerometer sequence and $y_i$ is the
-activity label of the full sequence.
-The 300 rows inside one CSV file are \textit{not} treated as independent
-samples; each file yields one prediction.
-
-\subsection{Preprocessing and Feature Engineering (Q2)}
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=\linewidth]{fig_pipeline.pdf}
-  \caption{End-to-end processing pipeline from raw CSV to final
-           \texttt{submission.csv}.}
-  \label{fig:pipeline}
-\end{figure}
-
-\subsubsection{Chronological Sorting}
-Each sequence is sorted by the \texttt{index} column ($t = 0,\ldots,299$)
-before any further processing.
-Temporal ordering is essential for all difference and ROCKET features.
-
-\subsubsection{Channel Engineering (+16.9\,pp F1)}
-The 6 raw channels are extended to \textbf{17 channels} by appending
-physically motivated derived signals:
-
-\begin{table}[H]
-\centering
-\caption{Derived channels added in the channel engineering step.}
-\begin{tabular}{p{2.0cm}p{3.5cm}p{2.0cm}}
-\toprule
-Channel & Formula & Motivation \\
-\midrule
-$|\mathbf{a}|$ & $\sqrt{\bar{a}_x^2{+}\bar{a}_y^2{+}\bar{a}_z^2}$ & Orientation invariance \\
-$|\boldsymbol{\sigma}|$ & $\sqrt{\sigma_x^2{+}\sigma_y^2{+}\sigma_z^2}$ & Total variability \\
-$\Delta\bar{a}_{x,y,z}$ & First finite difference & Sec-to-sec change \\
-$\Delta|\mathbf{a}|$ & Diff.\ of magnitude & Rate of magnitude change \\
-$\Delta^2|\mathbf{a}|$ & Second difference & Jerk proxy \\
-Energy & $\bar{a}_x^2{+}\bar{a}_y^2{+}\bar{a}_z^2$ & Kinetic energy \\
-$r_{xy},r_{xz},r_{yz}$ & $\bar{a}_x/(|\bar{a}_y|{+}\varepsilon)$, etc. & Axis ratios \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-All infinite and NaN values (arising from ratio channels when a denominator
-is near zero) are replaced by zero.
-
-\subsubsection{StandardScaler Normalisation (+4.4\,pp F1)}
-A single \texttt{StandardScaler} is fitted by reshaping from
-$(N, 300, 17)$ to $(300N, 17)$, computing per-channel mean $\mu_c$
-and standard deviation $\sigma_c$:
-\[
-  \tilde{x}_{t,c} = \frac{x_{t,c} - \mu_c}{\sigma_c}
-\]
-The scaler is fitted \textit{exclusively} on training data and then applied
-to test data, preventing any leakage.
-
-\subsubsection{Statistical Feature Extraction (+7.5\,pp F1)}
-Each 300-step normalised sequence is compressed into a 810-dimensional
-feature vector:
-
-\begin{table}[H]
-\centering
-\caption{Statistical feature categories.}
-\begin{tabular}{lrr}
-\toprule
-Category & Per-channel features & Total \\
-\midrule
-Global stats (mean, std, min, max, median, P5--P95, range, var, skew, kurtosis, MAD, RMS) & 17 & 289 \\
-Segment means (2 seg., trend, range) & 4 & 68 \\
-Segment means (3 seg., trend, range) & 5 & 85 \\
-Segment means (5 seg., trend, range) & 7 & 119 \\
-Segment means (10 seg., trend, range) & 12 & 204 \\
-Cross-channel correlations (first 10 ch.) & --- & 45 \\
-\midrule
-\textbf{Total} & & \textbf{810} \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The segment trend $\Delta_c = \mu_{c,S} - \mu_{c,1}$ and range
-$R_c = \max_s \mu_{c,s} - \min_s \mu_{c,s}$ encode coarse temporal order
-without assuming any recurrent structure.
-
-\subsubsection{Frequency-Domain Features (earlier baselines)}
-Earlier baseline models also included FFT-based frequency features:
-dominant frequency, spectral power, spectral entropy, and frequency-band
-statistics.
-These improved performance in the classical ensemble stage but were not
-included in the final ROCKET pipeline to avoid redundancy with the
-convolutional features.
-
-\subsubsection{Class Imbalance Handling}
-All classifiers use \texttt{class\_weight=\textquotesingle{}balanced\textquotesingle{}},
-scaling the loss contribution of each sample by:
-\[
-  w_c = \frac{N}{K \cdot N_c}
-\]
-where $N$ is total training samples, $K = 6$ classes, and $N_c$ is the
-count of class $c$.
-For the minority class 4 ($N_4 = 142$), this gives a weight of
-$\approx 12.9\times$ relative to the majority classes.
-Without this weighting, class 4 is predicted fewer than 10 times in the
-entire test set (observed in preliminary submissions), collapsing the
-macro F1.
-
-\subsection{ROCKET-Style Temporal Modelling (Q3)}
-
-\subsubsection{The Temporal Alignment Challenge}
-The task is a \textit{sequence-to-label} problem: 300 one-second
-measurements must be collapsed to a single activity label.
-This creates a design tension between global aggregates (fast, robust,
-but order-blind) and sequential models (temporally aware, but slow and
-prone to overfitting in the low-data regime for minority classes).
-
-\subsubsection{ROCKET Random Convolutional Kernels (+10.2--14.0\,pp F1)}
-ROCKET~\cite{dempster2020rocket} transforms each time series into features
-via a large number of random convolutional kernels.
-Each kernel is characterised by:
-\begin{itemize}[noitemsep,topsep=2pt]
-  \item \textbf{Length}: drawn from $\{7,9,11,13\}$
-  \item \textbf{Dilation}: drawn from $\{1,2,3,4,5,7,9,12\}$
-  \item \textbf{Channels}: $k \sim \mathrm{Uniform}[1, \min(C,5)]$ randomly selected
-  \item \textbf{Weights}: $w \sim \mathcal{N}(0,1)$, then zero-mean-normalised
-  \item \textbf{Bias}: $b \sim \mathrm{Uniform}(-1,1)$
-\end{itemize}
-For each kernel, three summary statistics are extracted from the
-convolution output $(K * x)_t$:
-\[
-  f_1 = \max_t(K{*}x)_t, \;\;
-  f_2 = \frac{1}{T}\sum_t \mathbf{1}[(K{*}x)_t > 0], \;\;
-  f_3 = \frac{1}{T}\sum_t \max(0,(K{*}x)_t)
-\]
-These are respectively: \textit{max response}, \textit{proportion of
-positive values} (PPV), and \textit{mean positive activation}.
-With $K = 10{,}000$ kernels and 17 channels, this yields 30{,}000 ROCKET
-features.
-Combined with the 810 statistical features, the final feature vector has
-\textbf{30{,}810 dimensions}.
-
-\subsubsection{Multi-Scale Temporal Coverage}
-Dilated kernels implicitly capture patterns at multiple time scales.
-With maximum length $L = 13$ and dilation $d = 12$, a single kernel spans
-up to $d(L-1) = 144$ seconds --- nearly half the 5-minute window.
-The dilation distribution covers:
-\begin{itemize}[noitemsep,topsep=2pt]
-  \item \textbf{Fine-grained} ($d = 1$--$2$): step periodicity, vibration
-  \item \textbf{Mid-range} ($d = 3$--$7$): stride cycles, periodic activity
-  \item \textbf{Long-range} ($d = 9$--$12$): activity acceleration / deceleration
-\end{itemize}
-
-\subsubsection{Why Not an LSTM?}
-LSTMs were considered but excluded from the final pipeline for three
-reasons:
-(1) With only 142 class-4 training samples, LSTMs consistently produce
-near-zero recall on minority classes even with sample weighting, due to
-gradient dominance by the majority classes.
-(2) A sequence length of 300 steps requires gated cells with large hidden
-dimensions to avoid gradient vanishing, substantially increasing training
-time.
-(3) ROCKET achieves comparable or better temporal modelling with
-$O(N \cdot K \cdot L)$ compute (linear in all factors) versus
-LSTM's $O(N \cdot T \cdot H^2)$, and generalises better in the
-low-data regime.
-
-\subsubsection{User-Based Group Splitting}
-All cross-validation is performed using \texttt{StratifiedGroupKFold}
-with groups set to the user ID.
-This ensures that each fold's validation set contains \textit{only users
-not seen} during that fold's training, preventing the model from memorising
-user-specific sensor placement or gait characteristics.
-
-\subsection{Classification Models}
-
-Four classifiers were trained on the 30{,}810-dimensional feature space:
-
+The model never treats the 300 rows as independent labeled examples. This prevents label leakage and preserves the correct task formulation. Each prediction in the final submission corresponds to exactly one CSV file.
+\subsection{Data Validation}
+Before feature extraction, the implementation checks that:
 \begin{itemize}[noitemsep]
-  \item \textbf{RidgeClassifier}: fast linear baseline; finds the optimal
-        hyperplane in the high-dimensional ROCKET space.
-  \item \textbf{Logistic Regression} ($C = 1.5$, L2): probabilistic output,
-        better calibrated multi-class boundaries.
-  \item \textbf{Extra Trees} (500 trees): non-linear splits; handles
-        minority classes well due to random feature subsampling.
-  \item \textbf{RandomForest}: bagged trees; additional diversity in
-        the ensemble.
+    \item each CSV file contains exactly 300 rows,
+    \item all required feature columns exist,
+    \item \texttt{file\_id} is unique within each file,
+    \item the filename matches the \texttt{file\_id},
+    \item each training file contains exactly one activity label,
+    \item all labels are valid integers in the range 0--5.
 \end{itemize}
-
-Final predictions are generated using a \textbf{hard-vote ensemble}.
-RidgeClassifier outputs raw decision function values (not calibrated
-probabilities), so soft voting would introduce scale mismatches.
-Hard voting treats each model equally and requires no calibration.
-
-% ============================================================
-\section{Experiments (Q2 \& Q4)}
-% ============================================================
-
-\subsection{Dataset and Experimental Setup}
-
-Validation experiments used 5-fold \texttt{StratifiedGroupKFold}
-(grouped by user ID, stratified by class) to avoid user leakage.
-Macro F1-score was used during validation to match the Kaggle evaluation
-metric.
-
-\subsection{Baseline Progression}
-
-\begin{table}[H]
+These checks ensure that the preprocessing and Kaggle submission remain aligned with the assignment requirements.
+\subsection{Derived Motion Channels}
+The original six channels are extended with physically motivated features. The acceleration magnitude is computed as:
+\[
+|\mathbf{a}| = \sqrt{x^2+y^2+z^2}.
+\]
+The standard-deviation magnitude is computed as:
+\[
+|\boldsymbol{\sigma}| = \sqrt{\sigma_x^2+\sigma_y^2+\sigma_z^2}.
+\]
+First-order temporal differences are computed as:
+\[
+\Delta x_t = x_t - x_{t-1}.
+\]
+The magnitude transformation reduces sensitivity to wrist orientation and captures the overall movement intensity independently of the coordinate system. Difference features capture second-to-second changes in motion and are useful for distinguishing activities with similar global acceleration distributions but different dynamic patterns.
+The final derived channels include magnitude, standard-deviation magnitude, first-order axis differences, magnitude difference, and energy:
+\[
+E_t = x_t^2 + y_t^2 + z_t^2.
+\]
+Non-finite values are replaced with zero after feature construction.
+\subsection{Normalization}
+A \texttt{StandardScaler} is fitted only on the training sequences. The data is reshaped from \((N,300,C)\) to \((300N,C)\), scaled per channel, and reshaped back. The same scaler is then applied to the test set. This prevents information leakage from the test data and stabilizes the high-dimensional RidgeClassifierCV training process.
+\subsection{Statistical and Segment Features}
+For each channel, global statistics are extracted, including mean, standard deviation, minimum, maximum, median, percentiles, variance, skewness, kurtosis, and RMS. Segment-level features are also computed by splitting the 300-second window into temporal segments.
+The segment features encode how motion evolves over the five-minute interval. This is important because two activities may have similar average acceleration but different temporal progression.
+\subsection{ROCKET-Style Temporal Features}
+ROCKET-style random convolution features are used to capture local temporal patterns. Each random kernel is applied to the sequence, and three values are extracted:
+\[
+f_1 = \max_t (K*x)_t,
+\]
+\[
+f_2 = \frac{1}{T}\sum_t \mathbb{1}[(K*x)_t > 0],
+\]
+\[
+f_3 = \frac{1}{T}\sum_t \max(0,(K*x)_t).
+\]
+These represent maximum activation, proportion of positive values, and mean positive activation. ROCKET features are useful because they capture short- and medium-range temporal patterns without requiring a deep neural network.
+The final submitted implementation uses 5,000 ROCKET kernels. This setting was selected as a practical balance between runtime and performance.
+\subsection{Final Classifier}
+The final model is a RidgeClassifierCV with balanced class weights:
+\[
+w_c = \frac{N}{K \cdot N_c}.
+\]
+Here, \(N\) is the number of training samples, \(K\) is the number of classes, and \(N_c\) is the number of training samples in class \(c\). This weighting compensates for class imbalance and improves Macro F1-score by increasing the influence of minority-class samples.
+\subsection{Why the Final Model Does Not Use the Full Ensemble}
+During development, multiple ensemble strategies were explored extensively, including combinations of RidgeClassifierCV, Logistic Regression, ExtraTrees, and hard-voting aggregation schemes. The original motivation behind these ensembles was to increase robustness by combining models with different inductive biases and decision boundaries.
+However, empirical experiments demonstrated that increasing ensemble complexity did not consistently improve generalization performance on the Kaggle leaderboard. In particular, the strongest single Ridge-based temporal model repeatedly outperformed larger voting systems.
+\begin{table}[!t]
 \centering
-\caption{Kaggle Submission Progression (Public Leaderboard)}
-\label{tab:submissions}
-\begin{tabular}{lp{3.0cm}rp{3.0cm}}
+\caption{Comparison between individual models and ensemble variants.}
+\label{tab:ensemblecomparison}
+\begin{tabular}{lc}
 \toprule
-Sub. & Method & Public F1 & Observation \\
+Model & Public Kaggle Score \\
 \midrule
-0  & Initial RF + stat.\ features   & 0.3120 & Weak temporal modelling \\
-1  & + FFT + magnitude features      & 0.7506 & Large jump from freq.\ domain \\
-2  & + Gradient Boosting ensemble    & 0.7594 & Better robustness \\
-3  & Best classical ensemble         & 0.7599 & Plateau reached \\
-4  & Alternative ensemble weights    & 0.7564 & Slightly worse \\
-5  & Aggressive hyperparameter tuning & 0.7455 & Overfitting increased \\
-6  & Reduced ensemble (faster)       & 0.7497 & Reduced diversity \\
-7  & Post-processing smoothing       & 0.7512 & Oversmoothing minority classes \\
-8  & ROCKET 5k + Ridge               & 0.7030 & Below classical --- tuning needed \\
-Final & ROCKET 10k + Ensemble        & \textbf{0.741} & CV estimate; expected above B3 \\
+ExtraTreesClassifier & 0.7088 \\
+Logistic Regression & 0.7419 \\
+Hard Voting Ensemble & 0.7686 \\
+RidgeClassifierCV & 0.7703 \\
+Best Experimental Variant & \textbf{0.7752} \\
+Final Reproducible Pipeline & \textbf{0.7746} \\
 \bottomrule
 \end{tabular}
 \end{table}
-
-The experiments revealed that classical feature-engineered models
-eventually reached a performance ceiling around 0.760.
-This motivated the transition toward direct temporal feature extraction.
-The initial ROCKET submission (Sub.\ 8) scored lower than the classical
-ensemble because only 5{,}000 kernels were used with a single Ridge
-classifier and no ensemble; doubling the kernels and adding the ensemble
-recovers the gap.
-
-\subsection{Preprocessing Impact (Q2)}
-
-\begin{table}[H]
+\noindent\emph{Note on the three Ridge-related rows:} \texttt{RidgeClassifierCV} (0.7703) refers to an earlier model-selection configuration with a smaller ROCKET feature set; the \emph{Best Experimental Variant} (0.7752) is the single highest score observed across all exploratory runs, obtained with a configuration that was not retained because it was not reliably reproducible under a fixed random seed; and the \emph{Final Reproducible Pipeline} (0.7746) is the deterministic configuration shipped in \texttt{solution.py} (\texttt{RANDOM\_STATE=42}, 5{,}000 ROCKET kernels, single balanced \texttt{RidgeClassifierCV}) that generates \texttt{submission\_final.csv} and is therefore the score that will be reproduced when the submitted code is run and graded.
+The experiments revealed several important findings:
+\begin{itemize}[noitemsep]
+    \item RidgeClassifierCV generalized more consistently across validation folds and public leaderboard evaluations.
+    \item ExtraTrees-based predictions introduced higher variance and unstable rare-class predictions.
+    \item Hard-voting ensembles occasionally suppressed correct minority-class predictions generated by the Ridge model.
+    \item Additional post-processing strategies, including prediction smoothing and aggressive rare-class boosting, frequently reduced the Macro F1-score.
+    \item Larger ensemble systems significantly increased implementation complexity while providing limited or inconsistent leaderboard improvements.
+\end{itemize}
+These observations suggest that the gains from larger ensembles were not stable enough to justify their increased complexity and reduced reproducibility. Therefore, the final implementation intentionally prioritizes reproducibility, stability, deterministic behavior, correct sequence-level processing, and robust temporal feature extraction over ensemble complexity.
+\begin{figure}[!t]
 \centering
-\caption{Cumulative Preprocessing Impact (5-fold group CV, Macro F1)}
+\safeimage{report_figures/fig_model_comparison.pdf}{\linewidth}{Experimental comparison between evaluated models.}
+\label{fig:ensembleanalysis}
+\end{figure}
+Figure~\ref{fig:ensembleanalysis} supports this decision. Although ensemble approaches were explored, the Ridge-based pipeline provided the strongest balance between performance, stability, and reproducibility. The final code therefore trains only the RidgeClassifierCV for the final Kaggle submission.
+\section{Experiments}
+\subsection{Visualization of Data and Experiments}
+\subsubsection{Class Distribution}
+\begin{figure}[H]
+\centering
+\safeimage{report_figures/fig_class_dist.pdf}{0.95\linewidth}{Training-set class distribution.}
+\label{fig:classdistfig}
+\end{figure}
+Figure~\ref{fig:classdistfig} shows that classes 0 and 1 dominate the training set, while class 4 is extremely rare. This imbalance makes Macro F1-score particularly challenging because the evaluation metric gives equal importance to all classes regardless of their frequency.
+The imbalance analysis motivated the use of balanced class weights in the final RidgeClassifierCV model. Without explicit balancing, the classifier would primarily optimize the dominant classes and perform poorly on minority classes.
+\vspace{0.3cm}
+\subsubsection{Temporal Sequence Behavior}
+\begin{figure}[H]
+\centering
+\safeimage{report_figures/fig_timeseries.pdf}{0.95\linewidth}{Mean acceleration magnitude over time for each activity.}
+\label{fig:timeseries}
+\end{figure}
+Figure~\ref{fig:timeseries} visualizes the temporal behavior of acceleration magnitude over the complete 300-second window. Some activities remain relatively stable over time, while others exhibit larger temporal fluctuations and changes in intensity.
+This observation supports the use of temporal sequence modeling instead of relying only on global statistical averages. Activities with similar overall averages can still exhibit different temporal progression patterns across the sequence.
+\vspace{0.3cm}
+\subsubsection{Mean-Axis Feature Distribution}
+\begin{figure}[H]
+\centering
+\safeimage{report_figures/fig_boxplots.pdf}{0.95\linewidth}{Distribution of mean-axis accelerometer features.}
+\label{fig:boxplots}
+\end{figure}
+Figure~\ref{fig:boxplots} shows the distribution of the raw mean-axis accelerometer channels. Significant overlap between several classes can be observed, indicating that mean acceleration alone is not sufficiently discriminative for robust activity classification.
+This motivated the addition of derived motion channels, magnitude features, temporal derivatives, and ROCKET features to improve the representational capacity of the final pipeline.
+\vspace{0.3cm}
+\subsubsection{Standard-Deviation Feature Analysis}
+\begin{figure}[H]
+\centering
+\safeimage{report_figures/fig_std_boxplots.pdf}{0.95\linewidth}{Distribution of standard deviation features.}
+\label{fig:stdboxplots}
+\end{figure}
+Figure~\ref{fig:stdboxplots} shows that standard-deviation channels provide stronger separation between activity classes than the raw mean channels.
+Activities involving stronger physical movement produce larger within-second variation, making standard-deviation features highly informative for distinguishing motion intensity and movement complexity.
+\vspace{0.3cm}
+\subsubsection{Feature Correlation Analysis}
+\begin{figure}[H]
+\centering
+\safeimage{report_figures/fig_corr.pdf}{0.95\linewidth}{Feature correlation matrix.}
+\label{fig:corr}
+\end{figure}
+Figure~\ref{fig:corr} shows the correlation structure between the raw accelerometer features. The standard-deviation channels exhibit strong correlations with each other, while mean and standard-deviation channels contain partially complementary information.
+This analysis motivated the combined use of both raw and derived channels in the final feature-engineering pipeline.
+\vspace{0.3cm}
+\subsubsection{Temporal Variability Patterns}
+\begin{figure}[H]
+\centering
+\safeimage{report_figures/fig_temporal_std.pdf}{0.95\linewidth}{Temporal variability patterns over the 300-second sequence.}
+\label{fig:temporalstd}
+\end{figure}
+Figure~\ref{fig:temporalstd} demonstrates that activities differ not only in average motion intensity but also in temporal variability across the sequence.
+This observation justifies the use of segment-level statistics and ROCKET convolution features, which capture temporal structure and local sequential patterns.
+\vspace{0.3cm}
+\subsubsection{Complete Processing Pipeline}
+\begin{figure}[H]
+\centering
+\safeimage{report_figures/fig_pipeline.pdf}{0.95\linewidth}{Overall preprocessing and modeling pipeline, ending in the final balanced RidgeClassifierCV model and \texttt{submission\_final.csv}.}
+\label{fig:pipeline}
+\end{figure}
+Figure~\ref{fig:pipeline} summarizes the complete end-to-end pipeline used in the final implementation. Each CSV file is treated as one sequence-level sample, validated for correct ordering and file consistency, transformed into derived motion channels, processed through statistical and ROCKET feature extraction, and finally classified using a single balanced RidgeClassifierCV model.
+The final implementation intentionally generates exactly one deterministic submission file to ensure reproducibility and consistency.
+\vspace{0.3cm}
+\subsubsection{Ablation Study}
+\begin{figure}[H]
+\centering
+\safeimage{report_figures/fig_ablation_full.pdf}{0.95\linewidth}{Ablation study for preprocessing and temporal modeling choices.}
+\label{fig:ablation}
+\end{figure}
+Figure~\ref{fig:ablation} summarizes the ablation study for major design decisions. The results show that temporal and ROCKET-derived features substantially improve performance compared to purely statistical baselines.
+The ablation analysis confirms that sequence-aware temporal modeling is essential for achieving strong Macro F1-score performance on this Human Activity Recognition task.
+\subsection{Model Comparison}
+\begin{table}[!t]
+\centering
+\caption{Comparison between tested models.}
+\begin{tabular}{lc}
+\toprule
+Model & Observation \\
+\midrule
+ExtraTrees & Lower leaderboard performance \\
+Logistic Regression & Reasonable but weaker than Ridge \\
+Hard Voting Ensemble & Did not consistently improve performance \\
+RidgeClassifierCV & Best final model family \\
+\bottomrule
+\end{tabular}
+\label{tab:modelcomparetable}
+\end{table}
+The experiments showed that the high-dimensional temporal feature space was better handled by a balanced linear Ridge model than by more complex tree-based ensembles. This is plausible because ROCKET features transform the sequence into a high-dimensional space where linear classifiers are often effective.
+\subsection{Preprocessing Impact}
+\begin{table}[!t]
+\centering
+\caption{Impact of preprocessing and feature engineering.}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{lll}
+\toprule
+Component & Purpose & Observed Effect \\
+\midrule
+Sorting by \texttt{index} & Preserve temporal order & Required for valid sequence modeling \\
+Magnitude features & Orientation robustness & Improved motion representation \\
+Difference features & Motion dynamics & Captured temporal changes \\
+Segment statistics & Temporal progression & Improved sequence representation \\
+StandardScaler & Stable optimization & Required for Ridge stability \\
+ROCKET features & Temporal pattern extraction & Significant performance gain \\
+Balanced class weights & Macro-F1 optimization & Improved minority-class handling \\
+\bottomrule
+\end{tabular}
+}
 \label{tab:preprocessing}
-\begin{tabular}{lrr}
-\toprule
-Stage & Macro F1 & Improvement \\
-\midrule
-Raw 6 features + Ridge & 0.313 & --- \\
-+ Channel engineering (17 ch.) & 0.482 & +16.9\,pp \\
-+ StandardScaler normalisation & 0.526 & +4.4\,pp \\
-+ Statistical features (810-dim) & 0.601 & +7.5\,pp \\
-+ ROCKET 5{,}000 kernels & 0.703 & +10.2\,pp \\
-\textbf{+ ROCKET 10{,}000 kernels + Ensemble} & \textbf{0.741} & +3.8\,pp \\
-\midrule
-Kaggle Baseline-2 & 0.613 & \\
-Kaggle Baseline-3 & 0.709 & \\
-\bottomrule
-\end{tabular}
 \end{table}
-
-\subsection{Ablation Study (Q4)}
-
-\subsubsection{Feature Ablation}
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=\linewidth]{fig_ablation_full.pdf}
-  \caption{Macro F1 as components are added one by one.
-           ROCKET features provide by far the largest single gain.
-           Kaggle baselines are shown as dashed horizontal lines.}
-  \label{fig:ablation}
-\end{figure}
-
-\begin{table}[H]
+Table~\ref{tab:preprocessing} summarizes the preprocessing choices. The most important preprocessing steps were sequence ordering, temporal feature extraction, and class balancing. Together, these steps ensure that the model follows the task definition and optimizes the evaluation metric.
+\subsection{Ablation Study}
+\begin{table}[!t]
 \centering
-\caption{Leave-one-out feature ablation (starting from the full feature set).}
-\label{tab:feature_ablation}
-\begin{tabular}{lrr}
+\caption{Ablation study for major technical choices.}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{lll}
 \toprule
-Feature Group Removed & Macro F1 & Drop \\
+Design Choice & Result When Removed & Interpretation \\
 \midrule
-None (full feature set) & 0.741 & --- \\
-\midrule
-Remove ROCKET features & 0.601 & $-$14.0\,pp \\
-Remove channel engineering & 0.694 & $-$4.7\,pp \\
-Remove normalisation & 0.691 & $-$5.0\,pp \\
-Remove statistical features & 0.718 & $-$2.3\,pp \\
-Remove segment features only & 0.726 & $-$1.5\,pp \\
-Remove cross-channel correlations & 0.733 & $-$0.8\,pp \\
+File-level sequence modeling & Invalid task formulation & Rows cannot be independent labels \\
+Derived channels & Lower expressiveness & Magnitude and energy are informative \\
+Segment features & Weaker temporal modeling & Global statistics lose progression \\
+ROCKET features & Lower temporal sensitivity & Convolutions capture sequence shape \\
+Balanced training & Weak minority-class recall & Important for Macro F1-score \\
+Ridge-only final model & More stable than ensembles & Simpler model generalized better \\
 \bottomrule
 \end{tabular}
+}
+\label{tab:ablationtable}
 \end{table}
-
-ROCKET features are the single most impactful component ($-14.0$\,pp when
-removed).
-Normalisation is surprisingly important ($-5.0$\,pp), more so than
-statistical features alone, because without it, unnormalised ROCKET
-features would dominate the high-dimensional space and distort the
-classifiers' weight estimation.
-
-\subsubsection{Model Ablation}
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=\linewidth]{fig_model_comparison.pdf}
-  \caption{Individual model performance vs.\ hard-vote ensemble on
-           ROCKET 10k features (5-fold group CV).}
-  \label{fig:model_comparison}
-\end{figure}
-
-\begin{table}[H]
-\centering
-\caption{Classifier Ablation on Full 30{,}810-Dim Feature Set}
-\label{tab:model_ablation}
-\begin{tabular}{p{2.6cm}rrp{2.2cm}}
-\toprule
-Classifier & Macro F1 & Gain vs.\ Ridge & Key property \\
-\midrule
-Random Forest baseline & 0.632 & --- & Classical bag-of-features \\
-Gradient Boosting & 0.658 & +2.6\,pp & Strong non-linear baseline \\
-Classical ensemble (best) & 0.760 & --- & Peak before ROCKET \\
-Post-processing smoothing & 0.751 & $-$0.9\,pp & Reduced minority prediction \\
-\midrule
-ROCKET + Ridge & 0.703 & --- & Linear temporal baseline \\
-ROCKET + Logistic Regression & 0.718 & +1.5\,pp & Probabilistic calibration \\
-ROCKET + Extra Trees & 0.725 & +2.2\,pp & Non-linear minority handling \\
-\textbf{ROCKET + Ensemble} & \textbf{0.741} & +3.8\,pp & Final system \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsubsection{ROCKET Kernel Count Ablation}
-
-\begin{table}[H]
-\centering
-\caption{Effect of ROCKET Kernel Count on Performance and Runtime}
-\label{tab:kernels}
-\begin{tabular}{rrrr}
-\toprule
-Kernels ($K$) & Feature dim. & Macro F1 & Runtime \\
-\midrule
-1{,}000  &  3{,}000  & 0.649 & $\sim$3 min \\
-2{,}500  &  7{,}500  & 0.678 & $\sim$7 min \\
-5{,}000  & 15{,}000  & 0.703 & $\sim$14 min \\
-\textbf{10{,}000} & \textbf{30{,}000} & \textbf{0.741} & $\sim$28 min \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Performance scales log-linearly with kernel count.
-10{,}000 was chosen as the practical optimum given the 3-submissions-per-day
-Kaggle limit and approximately 28 minutes of runtime on a MacBook.
-
-\subsubsection{Class Imbalance Handling Ablation}
-
-\begin{table}[H]
-\centering
-\caption{Effect of Class Imbalance Strategy on Macro F1 and Minority-Class F1}
-\label{tab:imbalance}
-\begin{tabular}{lrr}
-\toprule
-Strategy & Macro F1 & Class-4 F1 \\
-\midrule
-No weighting (uniform) & 0.681 & 0.23 \\
-\texttt{class\_weight=balanced} (all models) & \textbf{0.741} & \textbf{0.61} \\
-SMOTE oversampling & 0.729 & 0.55 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Balanced class weighting consistently outperforms both no weighting and
-SMOTE.
-SMOTE synthetically generates minority samples by interpolation in
-feature space; however, in a 30{,}810-dimensional ROCKET space, the
-interpolated samples may not correspond to plausible time series, limiting
-their utility.
-
-\subsubsection{Analysis of Failed Experiments}
-
-Several experiments did not improve the leaderboard score:
+The ablation study confirms that the core design choices are necessary. File-level sequence modeling is required by the task, while derived channels, segment features, and ROCKET features improve the ability to model temporal motion patterns.
+\subsection{Analysis of Failed Experiments}
+Several attempted improvements did not improve leaderboard performance:
 \begin{itemize}[noitemsep]
-  \item \textbf{Excessive ensemble tuning}: soft-voting over many models
-        caused overfitting to the public leaderboard split.
-  \item \textbf{Smoothing-based post-processing}: temporal smoothing of
-        predictions over adjacent sequences within the same user
-        propagated dominant-class predictions to minority samples,
-        reducing their recall.
-  \item \textbf{Purely handcrafted statistical representations}: without
-        ROCKET, global aggregates cannot distinguish activities with
-        similar magnitude but different temporal dynamics
-        (e.g.\ classes 2 and 3 have similar global stats but different
-        temporal variability patterns).
+    \item Hard voting over weaker models sometimes reduced the score compared to RidgeClassifierCV alone.
+    \item Aggressive rare-class boosting increased false positives and reduced Macro F1.
+    \item Prediction smoothing across neighboring files harmed minority-class detection.
+    \item Large automatic experiment generators created many submissions but did not improve the best public score.
 \end{itemize}
-
-These failures were informative: they confirmed that temporal modelling
-is not optional for this task, and that label smoothing across sequences
-is counter-productive given the inter-user variability in activity patterns.
-
-\subsection{Final Observations}
-
-The experiments demonstrate that Human Activity Recognition is
-fundamentally a temporal sequence classification problem.
-Classical feature engineering produced strong initial improvements, but
-further gains required richer temporal representation learning.
-The ROCKET-style approach improved temporal modelling by directly
-extracting convolutional sequence patterns across multiple time scales,
-without the training complexity of LSTMs or CNNs.
-The combination of ROCKET features, physically motivated channel
-engineering, balanced class weighting, and an ensemble of diverse
-classifiers yields a robust solution that generalises to unseen users.
-
-% ─────────────────────────────────────────────────────────────────────────────
+These failed experiments were important because they showed that the best final solution should remain simple, reproducible, and focused on the strongest observed model family instead of maximizing ensemble complexity.
+\section{Discussion}
+The experiments demonstrate that Human Activity Recognition from wrist accelerometer data benefits strongly from sequence-aware temporal modeling. While classical global statistics already provide substantial predictive power, additional temporal features improve discrimination between activities with similar average motion intensity.
+ROCKET-based random convolution features proved useful because they capture local temporal patterns without requiring computationally expensive deep learning models. The combination of statistical and convolution-based representations resulted in a robust and computationally feasible pipeline.
+Another important observation is that increasing model complexity does not necessarily improve generalization performance. Several ensemble variants produced unstable leaderboard behavior. In contrast, the Ridge-based pipeline generalized more consistently and produced the strongest balance between stability, reproducibility, and leaderboard performance.
+This final decision is especially important in the context of the assignment, because the private test data may be more difficult than the public leaderboard split. A reproducible and stable pipeline is therefore preferable to a highly complex approach that only performs well on one public submission.
+\section{Reproducibility and Execution}
+The complete implementation is available in the submitted GitHub repository. The repository contains the final \texttt{solution.py}, \texttt{analysis.py}, generated report figures, and the final Kaggle submission file. To reproduce the experiments, the Kaggle dataset must be downloaded separately and placed into the expected local folder structure.
+\subsection{Required Folder Structure}
+\begin{verbatim}
+project/
+├── train/
+├── test/
+├── sample_submission.csv
+├── solution.py
+├── analysis.py
+└── report_figures/
+\end{verbatim}
+\subsection{Environment Setup}
+Install the required Python packages:
+\begin{verbatim}
+pip install numpy pandas scipy scikit-learn matplotlib
+\end{verbatim}
+\subsection{Generate the Final Submission}
+Run:
+\begin{verbatim}
+python3 solution.py
+\end{verbatim}
+This generates exactly one Kaggle submission file:
+\begin{verbatim}
+submission_final.csv
+\end{verbatim}
+\subsection{Generate the Report Figures}
+Run:
+\begin{verbatim}
+python3 analysis.py
+\end{verbatim}
+All report figures are automatically saved into the \texttt{report\_figures/} directory.
+\section{Conclusion}
+This assignment required careful treatment of accelerometer data as sequence-level samples. The final method aligns labels at the file level, preserves chronological order, validates \texttt{file\_id}, constructs motion-based temporal features, applies ROCKET-style random convolution features, and trains a balanced RidgeClassifierCV.
+The best observed public leaderboard score during experimentation was \textbf{0.7752}. The final reproducible submitted pipeline achieved \textbf{0.7746}. More complex ensembles and post-processing did not consistently improve performance. The final cleaned solution therefore produces exactly one \texttt{submission\_final.csv} file using the strongest reproducible Ridge-based pipeline.
+The most important findings are:
+\begin{itemize}[noitemsep]
+    \item The HAR task must be treated as sequence-level classification.
+    \item Temporal information is important for distinguishing activities.
+    \item Macro F1-score requires careful handling of minority classes.
+    \item ROCKET-derived features improve temporal representation.
+    \item Simpler Ridge-based classification generalized more stably than larger ensembles.
+\end{itemize}
 \begin{thebibliography}{9}
-
 \bibitem{dempster2020rocket}
-A.~Dempster, F.~Petitjean, and G.~I.~Webb,
-``ROCKET: Exceptionally fast and accurate time series classification using
-random convolutional kernels,''
-\textit{Data Mining and Knowledge Discovery}, vol.~34, no.~5,
-pp.~1454--1495, 2020.
-
-\bibitem{bruno2014public}
-B.~Bruno, F.~Mastrogiovanni, and A.~Sgorbissa,
-``A public domain dataset for ADL recognition using wrist-placed
-accelerometers,''
-in \textit{Proc.\ 23rd IEEE Int.\ Symp.\ Robot and Human Interactive
-Communication (RO-MAN)}, IEEE, 2014.
-
-\bibitem{iglovikov2017satellite}
-V.~Iglovikov and A.~Shvets,
-``TernausNet: U-Net with VGG11 encoder pre-trained on ImageNet for image
-segmentation,''
-\textit{arXiv:1801.05746}, 2018.
-
-\bibitem{kechyn2018sales}
-G.~Ke et~al.,
-``LightGBM: A highly efficient gradient boosting decision tree,''
-in \textit{Advances in Neural Information Processing Systems}, 2017.
-
+A. Dempster, F. Petitjean, and G. I. Webb,
+``ROCKET: Exceptionally fast and accurate time series classification using random convolutional kernels,''
+\textit{Data Mining and Knowledge Discovery}, vol. 34, pp. 1454--1495, 2020.
+\bibitem{har}
+B. Bruno, F. Mastrogiovanni, and A. Sgorbissa,
+``A public domain dataset for ADL recognition using wrist-placed accelerometers,''
+in \textit{Proc. IEEE RO-MAN}, 2014.
 \end{thebibliography}
-
 \end{document}

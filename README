@@ -1,41 +1,8 @@
-# Data Mining Assignment 3
+# Data Mining Assignment 3 - Human Activity Recognition
 
-## Human Activity Recognition using Temporal Feature Engineering and ROCKET
+This repository contains my final solution for NYCU Data Mining Assignment 3, Human Activity Recognition using wrist-worn accelerometer time-series data.
 
-This repository contains the final solution for NYCU Data Mining Assignment 3.
-
-The task is Human Activity Recognition (HAR) using wrist accelerometer time-series data.
-
-The final implementation performs:
-
-- strict sequence-level classification
-- temporal feature engineering
-- ROCKET-style random convolution features
-- balanced Ridge classification
-- Kaggle submission generation
-- automatic analysis and report figure generation
-
-The final pipeline generates exactly one submission file:
-
-```text
-submission_final.csv
-```
-
-using the format:
-
-```text
-Id,Label
-```
-
-The best observed public Kaggle score during experimentation was:
-
-```text
-0.7752
-```
-
----
-
-# Repository Structure
+## Project Structure
 
 ```text
 .
@@ -49,217 +16,155 @@ The best observed public Kaggle score during experimentation was:
 └── README.md
 ```
 
----
+The Kaggle dataset is not included in this repository. It must be downloaded from the Kaggle competition page and placed into the local project directory.
 
-# Main Files
+Expected local data structure:
 
-## `solution.py`
+```text
+train/
+test/
+sample_submission.csv
+```
 
-Final reproducible submission pipeline.
+## Environment Setup
 
-Features:
-- loads train/test sequences
-- validates file consistency
-- applies feature engineering
-- generates ROCKET features
-- trains RidgeClassifierCV
-- creates exactly one submission file
+Create a virtual environment and install the required packages:
 
-Output:
+```bash
+python -m venv .venv
+pip install numpy pandas scipy scikit-learn matplotlib
+```
+
+On Windows PowerShell, the virtual environment can be activated with:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+## How to Run
+
+Run the final submission pipeline:
+
+```bash
+python3 solution.py
+```
+
+This creates exactly one Kaggle submission file:
 
 ```text
 submission_final.csv
 ```
 
----
+To generate the experimental analysis and report figures:
 
-## `analysis.py`
+```bash
+python3 analysis.py
+```
 
-Generates all report figures and experimental analysis.
-
-Creates:
-- class distribution plots
-- temporal sequence visualizations
-- boxplots
-- correlation matrices
-- ablation studies
-- model comparison figures
-- pipeline diagrams
-
-Outputs are saved into:
+Generated figures are saved into:
 
 ```text
 report_figures/
 ```
 
----
+## Method Overview
 
-# Dataset Format
+The final implementation performs:
 
-Each CSV file contains:
+1. Strict sequence-level classification
+2. Temporal feature engineering
+3. ROCKET-style random convolution feature extraction
+4. Balanced Ridge classification
+5. Kaggle submission generation
+6. Automatic analysis and report figure generation
 
-- 300 ordered time steps
-- 6 raw accelerometer features
+### Derived Features
 
-Raw columns:
+Additional temporal channels include:
 
-```python
-mean_x
-mean_y
-mean_z
-std_x
-std_y
-std_z
-```
+* acceleration magnitude
+* standard-deviation magnitude
+* first-order temporal differences
+* energy features
 
-Each file corresponds to exactly one activity label.
+### Statistical Features
 
----
+Extracted statistics include:
 
-# Method Overview
+* mean
+* standard deviation
+* min/max
+* percentiles
+* skewness
+* kurtosis
+* RMS
+* segment statistics
 
-## 1. Sequence-Level Classification
-
-Each CSV file is treated as one sequence:
-
-\[
-X_i \in \mathbb{R}^{300 \times 6}
-\]
-
-with one label:
-
-\[
-y_i \in \{0,1,2,3,4,5\}
-\]
-
-Rows are NOT treated as independent samples.
-
----
-
-## 2. Derived Channels
-
-Additional temporal channels are constructed:
-
-- acceleration magnitude
-- standard-deviation magnitude
-- first-order temporal differences
-- energy features
-
----
-
-## 3. Statistical Features
-
-Extracted features include:
-
-- mean
-- std
-- min/max
-- percentiles
-- skewness
-- kurtosis
-- RMS
-- segment statistics
-
----
-
-## 4. ROCKET Features
+### ROCKET Features
 
 Random convolution kernels are applied to the sequences.
 
-Final setup:
+Final configuration:
 
 ```python
 N_KERNELS = 5000
 ```
 
 Each kernel extracts:
-- maximum activation
-- positive proportion
-- positive mean activation
 
----
+* maximum activation
+* positive proportion
+* positive mean activation
 
-## 5. Final Classifier
+## Final Model
 
-Final model:
+The final classifier is:
 
 ```python
 RidgeClassifierCV(class_weight="balanced")
 ```
 
-This improves Macro F1-score under class imbalance.
-
----
-
-# Running the Final Submission
-
-Run:
-
-```bash
-python3 solution.py
-```
-
-This creates:
+The best observed public Kaggle score during experimentation was:
 
 ```text
-submission_final.csv
+0.7752
 ```
 
-Upload ONLY this file to Kaggle.
+## Validation Strategy
 
----
-
-# Running the Analysis
-
-Run:
-
-```bash
-python3 analysis.py
-```
-
-This generates all report figures inside:
-
-```text
-report_figures/
-```
-
----
-
-# Experimental Notes
-
-Several approaches were tested:
-
-- RidgeClassifierCV
-- Logistic Regression
-- ExtraTrees
-- Hard-voting ensembles
-- temporal smoothing
-- rare-class boosting
-
-Key findings:
-
-- RidgeClassifierCV generalized best
-- aggressive post-processing hurt Macro F1
-- larger ensembles were less stable
-- ROCKET features significantly improved temporal modeling
-
----
-
-# Validation Strategy
-
-Validation uses:
+Cross-validation is performed in `analysis.py` using:
 
 ```python
 StratifiedGroupKFold
 ```
 
-grouped by user ID.
+grouped by user ID and evaluated with macro-F1.
 
-This prevents user leakage between train and validation folds.
+This prevents user leakage between train and validation folds and ensures reliable evaluation of:
 
----
+* ablation studies
+* model comparisons
+* feature engineering experiments
 
-# Reproducibility
+## Experimental Notes
+
+Several approaches were tested during development:
+
+* RidgeClassifierCV
+* Logistic Regression
+* ExtraTrees
+* hard-voting ensembles
+* temporal smoothing
+* rare-class boosting
+
+Key findings:
+
+* RidgeClassifierCV generalized best
+* ROCKET features significantly improved temporal modeling
+* aggressive post-processing reduced Macro F1
+* larger ensembles were less stable
+
+## Reproducibility
 
 The final pipeline is deterministic:
 
@@ -269,26 +174,18 @@ RANDOM_STATE = 42
 
 The final implementation was selected based on:
 
-- reproducibility
-- stability
-- rule compliance
-- consistent sequence handling
+* reproducibility
+* stability
+* rule compliance
+* consistent sequence handling
 
-rather than optimizing for a single noisy public leaderboard score.
+rather than optimizing for a single noisy leaderboard score.
 
----
+## Notes
 
-# Dependencies
+Generated files such as report figures, Kaggle submissions, virtual environments, cached artifacts, and local datasets are intentionally excluded from the repository.
 
-Required packages:
+## Author
 
-```bash
-pip install numpy pandas scipy scikit-learn matplotlib
-```
-
----
-
-# Author
-
-Malena Benz  
+Malena Benz
 NYCU Data Mining Assignment 3

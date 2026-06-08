@@ -25,8 +25,10 @@ from sklearn.linear_model import RidgeClassifierCV
 from sklearn.pipeline import make_pipeline
 
 # Config
-# Set to a smaller number for a quick test; use 10000 for the full report.
-N_KERNELS_ANALYSIS = 10000
+# Matches N_KERNELS in solution.py so that every figure (incl. the pipeline
+# diagram and feature-dimension labels) reflects the exact configuration used
+# by the final, submitted pipeline — keeping report and code consistent.
+N_KERNELS_ANALYSIS = 5000
 N_SPLITS = 5
 
 OUT = "report_figures"
@@ -37,10 +39,13 @@ COLORS = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B3", "#937860"]
 # HELPERS
 
 def save(name):
-    plt.savefig(os.path.join(OUT, f"{name}.pdf"), bbox_inches="tight")
-    plt.savefig(os.path.join(OUT, f"{name}.png"), bbox_inches="tight", dpi=150)
+    plt.savefig(
+        os.path.join(OUT, f"{name}.pdf"),
+        bbox_inches="tight"
+    )
     plt.close()
-    print(f"  Saved {name}")
+
+    print(f"  Saved {name}.pdf")
 
 
 def macro_f1(y_true, y_pred):
@@ -308,17 +313,25 @@ plt.tight_layout(); save("fig_model_comparison")
 #Fig 9: Pipeline diagram
 fig, ax = plt.subplots(figsize=(13, 2.8))
 ax.set_xlim(0, 13); ax.set_ylim(0, 3); ax.axis("off")
+
+# Derive the ROCKET / concat feature-dimension labels directly from
+# N_KERNELS_ANALYSIS (== N_KERNELS in solution.py) so the diagram can never
+# drift out of sync with the actual submitted pipeline again.
+_rocket_feats = N_KERNELS_ANALYSIS * 3
+_total_feats = _rocket_feats + 810
+_fmt_k = lambda n: f"{n/1000:g}k"
+
 boxes = [
     (0.3,  "Raw CSV\n(300×6)"),
     (2.0,  "Channel\nEngineering\n(300×17)"),
     (3.8,  "Standard\nScaler\n(per ch.)"),
     (5.6,  "Statistical\nFeatures\n(810-dim)"),
-    (7.4,  f"ROCKET\n{N_KERNELS_ANALYSIS//1000}k kernels\n(30k feat.)"),
-    (9.2,  "Concat\n(30k+810)"),
-    (11.0, "Ensemble\nRidge+LR\n+ExtraTrees"),
-    (12.6, "submission\n.csv"),
+    (7.4,  f"ROCKET\n{_fmt_k(N_KERNELS_ANALYSIS)} kernels\n({_fmt_k(_rocket_feats)} feat.)"),
+    (9.2,  f"Concat\n({_fmt_k(_rocket_feats)}+810\n= {_fmt_k(_total_feats)})"),
+    (11.0, "Ridge\n(balanced)\nfinal model"),
+    (12.6, "submission\n_final.csv"),
 ]
-fc_map = {"ROCKET": "#FFF3CD", "Ensemble": "#D4EDDA", "submission": "#F8D7DA"}
+fc_map = {"ROCKET": "#FFF3CD", "Ridge": "#D4EDDA", "submission": "#F8D7DA"}
 for x, label in boxes:
     fc = next((v for k, v in fc_map.items() if k in label), "#E8F4FD")
     rect = mpatches.FancyBboxPatch((x - 0.75, 0.5), 1.4, 2.0,
